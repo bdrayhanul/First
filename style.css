@@ -2,5 +2,6 @@
   box-sizing: border-box;
   color: red;
   background-color: blueviolet;
-  
+  width: 0;
+  padding: 0;
 }
