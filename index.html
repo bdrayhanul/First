@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Table</title>
+    <style>
+      #table1 {
+        background-color: rgb(222, 217, 237);
+        width: 100%;
+        border-collapse: collapse;
+      }
+      #table1 tr,
+      #table1 th,
+      #table1 td {
+        text-align: center;
+        border: 1px solid;
+      }
+      input {
+        background-color: blue;
+
+      }
+    </style>
+  </head>
+  <body>
+    <table id="table1">
+      <tr>
+        <th>HTML</th>
+        <!--<th>JS</th>-->
+        <th colspan="2">PHP</th>
+        <th>CSS</th>
+      </tr>
+      <tr>
+        <td>1</td>
+        <td>2</td>
+        <td>3</td>
+        <td>4</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>6</td>
+        <td>7</td>
+        <td>8</td>
+      </tr>
+      <tr>
+        <td>9</td>
+        <!--<td></td>-->
+        <td colspan="3">11</td>
+        <!--<td>12</td>-->
+      </tr>
+    </table>
+    <form id="form1" action="">
+      <label for="firstname">First name</label><br />
+      <input type="text" name="firstname" id="firstname" /><br />
+      <label for="lastname">Last name</label><br />
+      <input type="text" name="lastname" id="lastname" /><br />
+      <label for="Discription">Discription</label><br />
+      <textarea
+        name="Discription"
+        id="Discription"
+        cols="30"
+        rows="10"
+      ></textarea
+      ><br />
+      <button type="button">Click Here</button><br /><br /><br /><br />
+      <input type="radio" name="radio1" id="radio1" />
+      <label for="radio1">HTML</label><br />
+      <input type="radio" name="radio1" id="radio2" />
+      <label for="radio2">CSS</label><br />
+      <input type="radio" name="radio1" id="radio3" />
+      <label for="radio3">JS</label><br />
+      <input type="checkbox" name="check1" id="check1" />
+      <label for="check1">Robin Pocha</label><br />
+      <input type="checkbox" name="check2" id="check2" />
+      <label for="check2">Roman Mather Hat</label><br />
+      <input type="checkbox" name="check3" id="check3" />
+      <label for="check3">Simina</label><br />
+      <select name="select1" id="select1">
+        <option value="Roman">Roman</option>
+        <option value="Robin">Robin</option>
+        <option value="Simina">Simina</option>
+      </select><br>
+      <button type="button">Romaner Biye</button>
+    </form>
+  </body>
+</html>
