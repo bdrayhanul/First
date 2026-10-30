@@ -1,3 +1,4 @@
 pillow>=10
 numpy>=1.24
 miniaudio>=1.59
+imageio-ffmpeg>=0.4.9

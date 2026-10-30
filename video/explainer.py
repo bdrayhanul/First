@@ -15,6 +15,8 @@ audio_synth.py; only the Bangla voice-over is fetched (and cached) from TTS.
 import io
 import math
 import os
+import shutil
+import subprocess
 import sys
 
 import numpy as np
@@ -27,7 +29,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 VOICE_DIR = os.path.join(HERE, "assets", "voice")
 
-VW, VH, SS = 640, 360, 2
+VW, VH, SS = 640, 360, 3         # design units; drawn at 3x for real AA
+OW, OH = 1280, 720                # output resolution
 FPS = 24
 TRANS = 0.36                      # transition length (s)
 
@@ -39,6 +42,10 @@ PINK = (244, 114, 182)
 WHITE = (244, 247, 255)
 DIM = (150, 165, 200)
 RED = (255, 99, 110)
+
+# what ends up on screen: the file name and codec actually written
+CODEC_LABEL = "H.264 720P"
+FILE_LABEL = "EXPLAINER.MP4  ·  1280x720  ·  H.264  ·  AAC"
 
 BANGLA_B = "/usr/share/fonts/truetype/noto/NotoSansBengali-Bold.ttf"
 BANGLA_R = "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf"
@@ -115,10 +122,10 @@ def glow_sprite():
 def vignette_mask():
     global _VIGNETTE
     if _VIGNETTE is None:
-        yy, xx = np.mgrid[0:VH, 0:VW]
-        r = np.sqrt(((xx - VW / 2) / (VW / 2)) ** 2 +
-                    ((yy - VH / 2) / (VH / 2)) ** 2) / 1.414
-        _VIGNETTE = Image.fromarray((np.clip(r ** 2.1 * 1.35, 0, 1) * 190).astype(np.uint8), "L")
+        yy, xx = np.mgrid[0:OH, 0:OW]
+        r = np.sqrt(((xx - OW / 2) / (OW / 2)) ** 2 +
+                    ((yy - OH / 2) / (OH / 2)) ** 2) / 1.414
+        _VIGNETTE = Image.fromarray((np.clip(r ** 2.1 * 1.3, 0, 1) * 255).astype(np.uint8), "L")
     return _VIGNETTE
 
 
@@ -126,7 +133,7 @@ def grain_tile(seed=0):
     global _GRAIN
     if _GRAIN is None:
         rng = np.random.default_rng(seed)
-        _GRAIN = [Image.fromarray(rng.integers(96, 160, (VH, VW), dtype=np.uint8), "L")
+        _GRAIN = [Image.fromarray(rng.integers(100, 156, (OH, OW), dtype=np.uint8), "L")
                   for _ in range(4)]
     return _GRAIN
 
@@ -215,10 +222,9 @@ class Frame:
         self.img.paste(Image.new("RGB", mask.size, color), xy, mask)
 
     def finish(self):
-        """downsample, then add vignette + grain (post, at output size)"""
-        out = self.img.resize((VW, VH), Image.LANCZOS)
-        out = Image.composite(Image.new("RGB", (VW, VH), (0, 0, 0)), out, vignette_mask())
-        return out
+        """vignette at output resolution; the 2x canvas *is* the 720p frame"""
+        out = self.img if self.img.size == (OW, OH) else self.img.resize((OW, OH), Image.LANCZOS)
+        return Image.composite(Image.new("RGB", (OW, OH), (0, 0, 0)), out, vignette_mask())
 
 
 def rgba(rgb, a):
@@ -276,7 +282,8 @@ def scene_intro(t, dur, ctx):
     f.text(VW / 2, 183, "শব্দ, ছবি আর অ্যানিমেশন — সব কোড দিয়ে",
            font(BANGLA_R, 17), rgba(DIM, sub_p), anchor="ms")
 
-    chips = (("MJPEG", AMBER), ("48 kHz PCM", CYAN), ("BN VOICE-OVER", PINK))
+    chips = (("H.264 720P" if CODEC_LABEL.startswith("H.264") else "MJPEG 720P", AMBER),
+             ("48 kHz AUDIO", CYAN), ("BN VOICE-OVER", PINK))
     cf = font(MONO, 9)
     cw = [f.twidth(s, cf) + 24 for s, _ in chips]
     cx = (VW - (sum(cw) + 12 * (len(chips) - 1))) / 2
@@ -446,6 +453,16 @@ def bn_num(n):
     return "".join(BN_DIGITS[int(c)] for c in str(int(n)))
 
 
+def set_stats(n_frames, total):
+    """the stat card shows the file that was written, so both the builder and
+    the verifier must agree on it before rendering"""
+    global STATS
+    STATS = ((n_frames, "FRAMES", bn_num(round(total)) + " সেকেন্ড"),
+             (FPS, "FPS", "প্রতি সেকেন্ডে"),
+             (A.SR // 1000, "kHz AUDIO", "মনো, ১৬-বিট"))
+    return STATS
+
+
 def scene_stats(t, dur, ctx):
     f = Frame((18, 15, 12), (42, 32, 20))
     f.glow(320, 300, 300, (120, 84, 24), 0.40)
@@ -480,7 +497,7 @@ def scene_stats(t, dur, ctx):
     cap = ease_out(seg(t, 1.7, 2.3))
     f.text(VW / 2, 296, "সব মিলিয়ে মাত্র একটাই ফাইল", font(BANGLA_B, 16),
            rgba(WHITE, 0.92 * cap), anchor="ms")
-    f.spaced(VW / 2, 309, "EXPLAINER.AVI  ·  640x360  ·  MJPEG  ·  PCM", font(MONO, 9),
+    f.spaced(VW / 2, 309, FILE_LABEL, font(MONO, 9),
              rgba(CYAN, 0.6 * cap), tracking=1.6, anchor="m")
 
     chrome(f, ctx["gp"], "04 / RESULT", t)
@@ -597,8 +614,8 @@ _WIPE_D = None
 def wipe_mask(p):
     global _WIPE_D
     if _WIPE_D is None:
-        yy, xx = np.mgrid[0:VH, 0:VW]
-        _WIPE_D = xx / (VW - 1) * 0.72 + yy / (VH - 1) * 0.28
+        yy, xx = np.mgrid[0:OH, 0:OW]
+        _WIPE_D = xx / (OW - 1) * 0.72 + yy / (OH - 1) * 0.28
     edge = 0.17
     m = np.clip((p * (1 + 2 * edge) - _WIPE_D) / edge + 0.5, 0, 1)
     return Image.fromarray((m * 255).astype(np.uint8), "L")
@@ -608,9 +625,9 @@ def push_in(img, z):
     """slow digital zoom: continuous motion even on a held frame"""
     if z <= 1.0005:
         return img
-    cw, ch = int(round(VW / z)), int(round(VH / z))
-    x, y = (VW - cw) // 2, (VH - ch) // 2
-    return img.crop((x, y, x + cw, y + ch)).resize((VW, VH), Image.LANCZOS)
+    cw, ch = int(round(OW / z)), int(round(OH / z))
+    x, y = (OW - cw) // 2, (OH - ch) // 2
+    return img.crop((x, y, x + cw, y + ch)).resize((OW, OH), Image.BICUBIC)
 
 
 def render_frame(t, segs, total, idx):
@@ -629,9 +646,9 @@ def render_frame(t, segs, total, idx):
         incoming = push_in(incoming, 1.0 + 0.035 * clamp01(nlocal / max(1e-3, nxt["dur"])))
         img = Image.composite(incoming, img, wipe_mask(p))
 
-    # grain + global fades
+    # a whisper of grain for texture, then the fades
     g = grain_tile()[idx % 4]
-    img = Image.blend(img, Image.merge("RGB", (g, g, g)), 0.05)
+    img = Image.blend(img, Image.merge("RGB", (g, g, g)), 0.018)
     if t < 0.45:
         img = ImageEnhance.Brightness(img).enhance(0.35 + 0.65 * (t / 0.45))
     tail = total - t
@@ -642,8 +659,40 @@ def render_frame(t, segs, total, idx):
 
 def encode_jpeg(img, quality):
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=quality, subsampling=1, optimize=True)
+    img.save(buf, "JPEG", quality=quality, subsampling=0, optimize=True)
     return buf.getvalue()
+
+
+def ffmpeg_exe():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return shutil.which("ffmpeg")
+
+
+def encode_mp4(path, frames, wav_path, crf=18, audio_kbps=160):
+    """stream raw RGB frames into x264 (no intermediate JPEG) and mux the mix"""
+    exe = ffmpeg_exe()
+    if not exe:
+        raise RuntimeError("no ffmpeg available")
+    cmd = [exe, "-y", "-loglevel", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "%dx%d" % (OW, OH),
+           "-r", str(FPS), "-i", "pipe:0",
+           "-i", wav_path,
+           "-c:v", "libx264", "-preset", "slow", "-crf", str(crf),
+           "-pix_fmt", "yuv420p", "-profile:v", "high", "-tune", "animation",
+           "-c:a", "aac", "-b:a", "%dk" % audio_kbps, "-ac", "1", "-ar", str(A.SR),
+           "-movflags", "+faststart", "-shortest", path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    try:
+        for img in frames:
+            proc.stdin.write(img.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed")
+    return os.path.getsize(path)
 
 
 SCENE_FNS = {
@@ -669,21 +718,36 @@ def make_contact_sheet(frames, cols=3, path=None):
     return sheet
 
 
+def frame_index(t, segs):
+    idx = 0
+    for k, s in enumerate(segs):
+        if t >= s["start"] - 1e-9:
+            idx = k
+    return idx
+
+
+def set_output_labels(use_mp4):
+    """intro chips / stats footer describe the file that is actually written"""
+    global CODEC_LABEL, FILE_LABEL
+    if use_mp4:
+        CODEC_LABEL = "H.264 720P"
+        FILE_LABEL = "EXPLAINER.MP4  ·  1280x720  ·  H.264  ·  AAC"
+    else:
+        CODEC_LABEL = "MJPEG 720P"
+        FILE_LABEL = "EXPLAINER.AVI  ·  1280x720  ·  MJPEG  ·  PCM"
+
+
 def main(argv):
     global STATS
 
-    quality = 82
-    if "--quality" in argv:
-        quality = int(argv[argv.index("--quality") + 1])
+    crf = int(argv[argv.index("--crf") + 1]) if "--crf" in argv else 16
+    quality = int(argv[argv.index("--quality") + 1]) if "--quality" in argv else 92
+    force_avi = "--avi" in argv
 
     os.makedirs(OUT, exist_ok=True)
     segs, total = build_timeline()
     n_frames = int(round(total * FPS))
-
-    # the stat card shows the file we are about to write, not a guess
-    STATS = ((n_frames, "FRAMES", bn_num(round(total)) + " সেকেন্ড"),
-             (FPS, "FPS", "প্রতি সেকেন্ডে"),
-             (A.SR // 1000, "kHz AUDIO", "মনো, ১৬-বিট"))
+    set_stats(n_frames, total)
 
     print("timeline: %d scenes, %.2f s, %d frames @ %d fps"
           % (len(segs), total, n_frames, FPS))
@@ -698,28 +762,34 @@ def main(argv):
           % (len(mix) / A.SR, float(np.abs(mix).max()),
              20 * math.log10(float(np.sqrt((mix ** 2).mean())) + 1e-12), wav_path))
 
-    jpegs = []
+    poster_times = [s["start"] + min(s["dur"] - 0.45, 2.7) for s in segs]
     posters = []
-    for i in range(n_frames):
-        t = i / FPS
-        idx = 0
-        for k, s in enumerate(segs):
-            if t >= s["start"] - 1e-9:
-                idx = k
-        img = render_frame(t, segs, total, idx)
-        jpegs.append(encode_jpeg(img, quality))
-        poster_times = [s["start"] + min(s["dur"] - 0.45, 2.7) for s in segs]
-        if any(abs(t - pt) < 0.5 / FPS for pt in poster_times):
-            posters.append(img)
-        if i % 60 == 0:
-            print("   frame %3d/%d  (%6.1f KB avg)"
-                  % (i, n_frames, sum(len(j) for j in jpegs) / len(jpegs) / 1024.0))
 
-    pcm = (np.clip(mix, -1, 1) * 32767.0).astype("<i2").tobytes()
-    avi_path = os.path.join(OUT, "explainer.avi")
-    size = write_avi_mjpeg(avi_path, jpegs, VW, VH, FPS, pcm, A.SR)
-    print("video: %dx%d, %d frames, %.1f MB -> %s"
-          % (VW, VH, n_frames, size / 1048576.0, avi_path))
+    def frames():
+        for i in range(n_frames):
+            t = i / FPS
+            img = render_frame(t, segs, total, frame_index(t, segs))
+            if any(abs(t - pt) < 0.5 / FPS for pt in poster_times):
+                posters.append(img)
+            if i % 60 == 0:
+                print("   frame %3d/%d" % (i, n_frames))
+            yield img
+
+    use_mp4 = bool(not force_avi and ffmpeg_exe())
+    set_output_labels(use_mp4)
+    if use_mp4:
+        path = os.path.join(OUT, "explainer.mp4")
+        size = encode_mp4(path, frames(), wav_path, crf=crf)
+        codec = "H.264 CRF %d + AAC 160k" % crf
+    else:
+        path = os.path.join(OUT, "explainer.avi")
+        jpegs = [encode_jpeg(img, quality) for img in frames()]
+        pcm = (np.clip(mix, -1, 1) * 32767.0).astype("<i2").tobytes()
+        size = write_avi_mjpeg(path, jpegs, OW, OH, FPS, pcm, A.SR)
+        codec = "MJPEG q%d + PCM" % quality
+
+    print("video: %dx%d, %d frames, %.1f MB (%s) -> %s"
+          % (OW, OH, n_frames, size / 1048576.0, codec, path))
 
     make_contact_sheet(posters, cols=3, path=os.path.join(OUT, "contact.png"))
     print("contact sheet -> out/contact.png")

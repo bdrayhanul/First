@@ -4,12 +4,12 @@ Two independent builds live here.
 
 | # | file | what it is | deps |
 |---|------|-----------|------|
-| 1 | `explainer.py` | 26 s narrated explainer: motion design, Bangla voice-over, music bed + sound design, muxed into one AVI | pillow, numpy, miniaudio |
+| 1 | `explainer.py` | 26 s narrated explainer: motion design, Bangla voice-over, music bed + sound design, encoded to MP4 | pillow, numpy, miniaudio, imageio-ffmpeg |
 | 2 | `make_video.py` | 2 s animation + GIF/PNG, containers written from scratch | none (stdlib only) |
 
 ```
 pip3 install -r requirements.txt
-python3 explainer.py          # -> out/explainer.avi (+ .wav, contact.png)
+python3 explainer.py          # -> out/explainer.mp4 (+ .wav, contact.png)
 python3 verify_explainer.py   # independent checks + out/audio.png
 
 python3 make_video.py         # -> out/demo.avi, demo.gif, poster.png
@@ -18,12 +18,17 @@ python3 verify_video.py
 
 ## 1. The narrated explainer
 
-`out/explainer.avi` — **640x360, 24 fps, 625 frames (26.0 s), MJPEG video +
-48 kHz 16-bit mono PCM audio in a single RIFF/AVI file, 11.6 MB.**
+`out/explainer.mp4` — **1280x720, 24 fps, 625 frames (26.0 s), H.264 High
+(CRF 16, yuv420p) + AAC 160 kb/s 48 kHz mono, 3.5 MB, faststart.**
 
-* `out/explainer.wav` — the mix on its own (bit-identical to the AVI audio track)
+* `out/explainer.wav` — the mix on its own, before AAC
 * `out/contact.png` — one poster frame per scene
 * `out/audio.png` — waveform + log-frequency spectrogram of the mix
+
+If `ffmpeg` is not available the same script falls back to an uncompressed
+MJPEG + PCM AVI (`python3 explainer.py --avi`), which needs no encoder — that
+path is what the repo used before `imageio-ffmpeg` was added, and it is why the
+fallback looks softer: MJPEG at the same bitrate is far weaker than x264.
 
 ### Timeline
 
@@ -37,22 +42,24 @@ python3 verify_video.py
 
 Scene lengths are **derived from the narration**, not hard-coded: the TTS clip is
 fetched, measured, and the scene is set to `max(min_dur, voice + 0.95 s)`, then
-rounded to a whole number of frames. That is why the video is 26 s and not 25 s.
+rounded to a whole number of frames.
 
 ### How the picture is made
 
-* everything is drawn with Pillow at **2x (1280x720)** and downsampled with
-  LANCZOS, so edges and text are clean
+* drawn with Pillow at **3x (1920x1080)** in 640x360 design units, then
+  downsampled to 1280x720 with LANCZOS — that supersampling is the real
+  anti-aliasing, and it is why text edges stay clean
 * keyframes everywhere: `ease_out`, `ease_in_out`, `ease_out_back` (cards,
   chips, nodes) and `ease_out_expo` (number counters)
 * per scene: gradient + glow beds, film-strip perforations, staggered card
   reveals, animated dashed pipeline with travelling pulses, count-up stats with
   a live level meter, logo with an expanding ring pulse
-* continuous motion: slow 3.5 % push-in on every scene, drifting glows, floating
+* continuous motion: slow 2 % push-in on every scene, drifting glows, floating
   cards, scrolling perforations
 * transitions: 0.36 s diagonal wipe with a soft edge, blended over two rendered
   frames; global fade-in from black and fade-out to black
-* post: vignette + animated film grain
+* post: vignette + a very light grain (1.8 %) — heavier grain was measured to
+  cost most of the bitrate for nothing
 
 ### How the sound is made (`audio_synth.py`)
 
@@ -67,10 +74,11 @@ No samples on disk — everything is synthesised with numpy at 48 kHz:
   with a gliding centre frequency (overlap-add of 24 bandpassed chunks)
 * **voice-over**: fetched once from Google Translate TTS (`tl=bn`), resampled to
   48 kHz, high-passed at 95 Hz, levelled, cached as `assets/voice/vo_*.wav`
-* **mix**: the music is side-chain ducked by the voice envelope (−0.72 depth), so
-  speech always sits on top; soft-clip, fades, normalise to −0.7 dBFS peak
+* **mix**: the music is side-chain ducked by the voice envelope, so speech always
+  sits on top; soft-clip, fades, normalise to −0.7 dBFS peak
 
-### Container (`avilib.py`)
+
+### Container (`avilib.py`, the fallback path)
 
 `write_avi_mjpeg()` writes both streams by hand: `avih` (2 streams), two `strl`
 blocks (`vids`/`MJPG` + `auds`/PCM `WAVEFORMATEX`), `movi` with `00db`/`01wb`
@@ -80,45 +88,33 @@ mpv, ffmpeg and QuickTime all open the file as-is.
 
 ### Verification
 
-`verify_explainer.py` re-parses the finished AVI instead of trusting the writer:
+`verify_explainer.py` does not trust the encode. It asks ffmpeg for the stream
+layout, decodes frames *back out of the MP4*, re-renders the same timestamps and
+measures PSNR, then decodes the AAC track and correlates it with the mix:
 
 ```
 $ python3 verify_explainer.py
-AVI
-  ok   AVI: RIFF....AVI signature
-  ok   AVI: RIFF size 12132942 == filesize-8 (12132942)
-  ok   AVI: two streams, ['vids', 'auds']
-  ok   AVI: video handler is MJPG
-  ok   AVI: strf biCompression == MJPG
-  ok   AVI: 640x360 video
-  ok   AVI: 24 fps
-  ok   AVI: strh length 625 == 625 chunks in movi
-  ok   AVI: audio is 16-bit mono PCM
-  ok   AVI: audio is 48000 Hz
-  ok   AVI: PCM block align / byte rate consistent
-  ok   AVI: 625 video + 625 audio chunks, 1250 index entries
-  ok   AVI: index is interleaved video/audio
-  ok   AVI: idx1 offsets resolve to real chunks
-        frame  78  (640, 360)  mean  38.7  std 36.6
-        frame 156  (640, 360)  mean  27.2  std 20.8
-        frame 312  (640, 360)  mean  27.4  std 19.3
-        frame 468  (640, 360)  mean  30.1  std 32.7
-        frame 546  (640, 360)  mean  30.6  std 33.2
-  ok   AVI: frames decode out of the container (size/brightness/contrast)
-  ok   AVI: fade in / fade out (first mean 10.7, last mean 1.0)
-  ok   AVI: 2500000 audio bytes == 625 frames x 2000 samples x 2 bytes
-  ok   AVI: every audio chunk holds exactly 2000 samples
-  ok   AVI: no clipped samples (peak 0.920)
-  ok   AVI: healthy level (rms 0.216)
-  ok   AVI: audio 26.042 s == video 26.042 s (A/V in sync)
+MP4
+  ok   MP4: H.264 video stream
+  ok   MP4: 1280x720 video
+  ok   MP4: 24 fps
+  ok   MP4: yuv420p (plays everywhere)
+  ok   MP4: AAC 48000 Hz mono audio
+  ok   MP4: duration 26.040 s == 26.042 s of frames (A/V in sync)
+        frame  78  1280x720  PSNR 41.04 dB  mean|err| 1.35
+        frame 312  1280x720  PSNR 42.64 dB  mean|err| 1.29
+        frame 546  1280x720  PSNR 41.56 dB  mean|err| 1.55
+  ok   MP4: every sampled frame is >= 36 dB PSNR vs the render
+  ok   MP4: decoded AAC matches the mix (correlation 0.99987)
+  ok   MP4: audio track length 26.048 s vs mix 26.042 s
+  ok   MP4: AAC level preserved (0.198 vs 0.198)
 WAV
   ok   WAV: mono, 16-bit, 48000 Hz
-  ok   WAV: same byte length as the AVI audio track
-  ok   WAV: bit-identical samples to the AVI audio
+  ok   WAV: 26.042 s long, matches the timeline
 VOICE
-  ok   speech present in 'intro   ' at  0.50 s (rms 0.224)
-  ok   speech present in 'problem ' at  5.08 s (rms 0.225)
-  ok   speech present in 'solution' at 11.00 s (rms 0.225)
+  ok   speech present in 'intro   ' at  0.50 s (rms 0.203)
+  ok   speech present in 'problem ' at  5.08 s (rms 0.221)
+  ok   speech present in 'solution' at 11.00 s (rms 0.220)
   ok   speech present in 'stats   ' at 16.79 s (rms 0.214)
   ok   speech present in 'outro   ' at 23.54 s (rms 0.240)
   ok   music continues (ducked) between lines (rms 0.111)
@@ -128,17 +124,37 @@ SPECTROGRAM
 all checks passed
 ```
 
-The frames are also compared pixel-by-pixel against a fresh render
-(`mean|diff| ≈ 0.4–2.1`, i.e. JPEG quantisation only), which proves the file's
-frame order matches its timeline.
+`--avi` switches the verifier over to the RIFF checks (two streams, `movi`
+chunks, `idx1` offsets, PCM reassembly) when the fallback file is built instead.
+
+### Why the first encode looked soft (and what changed)
+
+The first version was a 640x360 MJPEG AVI averaging 15 KB per frame. Measured
+problems, in order of impact:
+
+| cause | fix |
+|---|---|
+| ~3.4 Mbit/s budget for 720p-equivalent detail — x264 needs ~900 kb/s for this content | H.264 CRF 16 via `imageio-ffmpeg` (3.5 MB total instead of 11.6 MB at 4x the pixels) |
+| animated film grain at 5 % — high-frequency noise eats the bitrate first, so text got starved | grain reduced to 1.8 %, vignette kept |
+| 4:2:2 chroma subsampling smeared coloured text | x264 `yuv420p` with `-tune animation`, and coloured text now sits on flat backgrounds |
+| only 2x supersampling | 3x (1920x1080) then LANCZOS to 720p |
+| push-in resampled the finished 720p image | 2 % push-in with BICUBIC |
+
+Result: 41-43 dB PSNR against the reference render, i.e. the encode is
+visually transparent.
 
 ### Customising
 
 ```python
 SCRIPT = (("intro", "…", 4.2), …)   # scene key, Bangla line, minimum length
 ACCENTS = ((0, 1.50, lambda: A.blip(1180.0, amp=0.30)), …)   # sfx per reveal
-VW, VH, FPS = 640, 360, 24
-python3 explainer.py --quality 90   # bigger JPEGs, better gradients
+VW, VH, SS, OW, OH, FPS = 640, 360, 3, 1280, 720, 24
+```
+
+```bash
+python3 explainer.py --crf 12      # near-lossless, bigger file
+python3 explainer.py --crf 22      # smaller file, more artefacts
+python3 explainer.py --avi         # MJPEG/PCM fallback, no ffmpeg needed
 ```
 
 ## 2. The stdlib-only demo (`make_video.py`)
@@ -220,20 +236,17 @@ SUBTITLE = "PURE PYTHON - NO FFMPEG"
 
 ## Notes and limits
 
-* No ffmpeg here, so both files use formats that need no codec library:
-  uncompressed BGR (demo) and MJPEG (explainer) video, plus raw PCM audio.
-  That is why they are megabytes instead of kilobytes.
-* With ffmpeg on the machine, converting is one command:
-
-  ```
-  ffmpeg -i out/explainer.avi -c:v libx264 -crf 20 -c:a aac -b:a 128k out/explainer.mp4
-  ```
-
+* The explainer encodes with x264 through `imageio-ffmpeg`, which ships its own
+  ffmpeg binary, so no system ffmpeg is needed. Without that wheel the `--avi`
+  fallback writes MJPEG + raw PCM: it plays everywhere, but looks much softer at
+  the same file size.
+* The stdlib demo (`make_video.py`) still writes uncompressed BGR, because its
+  whole point is doing it with no encoder at all.
 * The voice-over comes from Google Translate TTS and is fetched **once**, then
   cached as WAV in `assets/voice/`. Delete those files to re-voice a line, or
   re-record them yourself and keep the filenames (`vo_intro.wav`, ...).
-* Audio is mono 48 kHz by design: it keeps the AVI interleave trivially exact
-  (2000 samples per frame at 24 fps) and the file small.
+* Audio is mono 48 kHz: it keeps the AVI fallback's interleave exact (2000 samples
+  per frame at 24 fps) and the AAC track small.
 * Bengali text is shaped by Pillow/raqm through Noto Sans Bengali. Latin text
   must not be drawn with the Bengali font (it has no Latin glyphs), so every
   mixed line is split into a Bangla run and a mono run.

@@ -10,7 +10,9 @@ Independent checks on out/explainer.avi:
 
 import io
 import os
+import re
 import struct
+import subprocess
 import sys
 import wave
 
@@ -22,6 +24,7 @@ import explainer as E
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
+MP4 = os.path.join(OUT, "explainer.mp4")
 AVI = os.path.join(OUT, "explainer.avi")
 
 failures = []
@@ -101,7 +104,81 @@ def parse(path):
     return info, blob
 
 
-def check_avi():
+def ff(*args):
+    exe = E.ffmpeg_exe()
+    return subprocess.run([exe, "-hide_banner", "-loglevel", "error"] + list(args),
+                          check=True, capture_output=True)
+
+
+def ff_info(path):
+    exe = E.ffmpeg_exe()
+    return subprocess.run([exe, "-hide_banner", "-i", path],
+                          capture_output=True, text=True).stderr
+
+
+def decode_frames(path, indices):
+    """pull exact frame numbers out of the encode, as PNG bytes"""
+    out = {}
+    for i in indices:
+        png = ff("-i", path, "-vf", "select=eq(n\\,%d)" % i, "-frames:v", "1",
+                 "-f", "image2pipe", "-vcodec", "png", "pipe:1").stdout
+        out[i] = png
+    return out
+
+
+def check_mp4():
+    print("MP4")
+    info = ff_info(MP4)
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", info)
+    secs = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+    check("Video: h264" in info, "MP4: H.264 video stream")
+    check("%dx%d" % (E.OW, E.OH) in info, "MP4: %dx%d video" % (E.OW, E.OH))
+    check("%d fps" % E.FPS in info, "MP4: %d fps" % E.FPS)
+    check("yuv420p" in info, "MP4: yuv420p (plays everywhere)")
+    check("Audio: aac" in info and "%d Hz" % A.SR in info and "mono" in info,
+          "MP4: AAC %d Hz mono audio" % A.SR)
+
+    segs, total = E.build_timeline()
+    n_frames = int(round(total * E.FPS))
+    E.set_stats(n_frames, total)          # the stat card must match the file
+    check(abs(secs - n_frames / E.FPS) < 0.06,
+          "MP4: duration %.3f s == %.3f s of frames (A/V in sync)"
+          % (secs, n_frames / E.FPS))
+
+    picks = [n_frames // 8, n_frames // 2, 7 * n_frames // 8]
+    decoded = decode_frames(MP4, picks)
+    worst = 99.0
+    for i in picks:
+        dec = np.asarray(Image.open(io.BytesIO(decoded[i])).convert("RGB"), dtype=np.float64)
+        t = i / E.FPS
+        ref = np.asarray(E.render_frame(t, segs, total, E.frame_index(t, segs)),
+                         dtype=np.float64)
+        if dec.shape != ref.shape:
+            check(False, "MP4: frame %d has the wrong size %s" % (i, dec.shape))
+            continue
+        mse = float(((dec - ref) ** 2).mean())
+        psnr = 10 * np.log10(255.0 ** 2 / max(mse, 1e-9))
+        worst = min(worst, psnr)
+        print("        frame %3d  %dx%d  PSNR %5.2f dB  mean|err| %.2f"
+              % (i, dec.shape[1], dec.shape[0], psnr, np.abs(dec - ref).mean()))
+    check(worst > 36.0, "MP4: every sampled frame is >= 36 dB PSNR vs the render")
+
+    wav = ff("-i", MP4, "-vn", "-ac", "1", "-ar", str(A.SR),
+             "-c:a", "pcm_s16le", "-f", "wav", "pipe:1").stdout
+    with wave.open(io.BytesIO(wav)) as w:
+        aac = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype(np.float64) / 32768.0
+    mix = A.read_wav(os.path.join(OUT, "explainer.wav"))
+    n = min(len(aac), len(mix))
+    corr = float(np.corrcoef(aac[:n], mix[:n])[0, 1])
+    check(corr > 0.99, "MP4: decoded AAC matches the mix (correlation %.5f)" % corr)
+    check(abs(len(aac) - len(mix)) / A.SR < 0.05,
+          "MP4: audio track length %.3f s vs mix %.3f s"
+          % (len(aac) / A.SR, len(mix) / A.SR))
+    check(abs(aac[:n].std() - mix[:n].std()) < 0.02,
+          "MP4: AAC level preserved (%.3f vs %.3f)" % (aac[:n].std(), mix[:n].std()))
+    return mix
+
     print("AVI")
     info, blob = parse(AVI)
     kinds = [s["kind"] for s in info["streams"]]
@@ -111,7 +188,7 @@ def check_avi():
 
     check(v["handler"] == "MJPG", "AVI: video handler is MJPG")
     check(v["compression"] == b"MJPG", "AVI: strf biCompression == MJPG")
-    check((v["width"], v["height"]) == (E.VW, E.VH),
+    check((v["width"], v["height"]) == (E.OW, E.OH),
           "AVI: %dx%d video" % (v["width"], v["height"]))
     check(v["scale"] == 1 and v["rate"] == E.FPS, "AVI: %d fps" % v["rate"])
     check(v["length"] == n, "AVI: strh length %d == %d chunks in movi" % (v["length"], n))
@@ -148,7 +225,7 @@ def check_avi():
         arr = np.asarray(img, dtype=np.float32)
         mean, std = float(arr.mean()), float(arr.std())
         print("        frame %3d  %s  mean %5.1f  std %4.1f" % (i, img.size, mean, std))
-        if img.size != (E.VW, E.VH) or std < 6.0 or mean < 3.0:
+        if img.size != (E.OW, E.OH) or std < 6.0 or mean < 3.0:
             good = False
     check(good, "AVI: frames decode out of the container (size/brightness/contrast)")
 
@@ -177,15 +254,17 @@ def check_avi():
     return info, x, pcm
 
 
-def check_wav(x, pcm):
+def check_wav():
     print("WAV")
     path = os.path.join(OUT, "explainer.wav")
     with wave.open(path, "rb") as w:
         params = (w.getnchannels(), w.getsampwidth(), w.getframerate())
         raw = w.readframes(w.getnframes())
+    segs, total = E.build_timeline()
     check(params == (1, 2, A.SR), "WAV: mono, 16-bit, %d Hz" % A.SR)
-    check(len(raw) == len(pcm), "WAV: same byte length as the AVI audio track")
-    check(raw == pcm, "WAV: bit-identical samples to the AVI audio")
+    check(abs(len(raw) / 2 / A.SR - total) < 1e-6,
+          "WAV: %.3f s long, matches the timeline" % (len(raw) / 2 / A.SR))
+    return A.read_wav(path)
 
 
 def check_voice(x):
@@ -259,11 +338,19 @@ def audio_png(x, path):
 
 
 def main():
-    info, x, pcm = check_avi()
-    check_wav(x, pcm)
-    check_voice(x)
+    mix = None
+    if os.path.exists(MP4):
+        mix = check_mp4()
+    if os.path.exists(AVI):
+        info, x, pcm = check_avi()
+        if mix is None:
+            mix = x
+    wav_mix = check_wav()
+    if mix is None:
+        mix = wav_mix
+    check_voice(mix)
     print("SPECTROGRAM")
-    p = audio_png(x, os.path.join(OUT, "audio.png"))
+    p = audio_png(mix, os.path.join(OUT, "audio.png"))
     check(os.path.getsize(p) > 5000, "wrote %s (%d bytes)"
           % (os.path.basename(p), os.path.getsize(p)))
     print()
